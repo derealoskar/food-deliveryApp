@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    // You are an admin when a document admins/<your user id> exists. Create it in the Firebase console.
+    function isAdmin() { return signedIn() && exists(/databases/$(db)/documents/admins/$(request.auth.uid)); }
+
+    match /admins/{uid} { allow read: if signedIn() && request.auth.uid == uid; }
+
+    // Each customer's own data. The wallet balance can NEVER be changed from the app (only by Cloud Functions).
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid && request.resource.data.get('wallet', 0) == 0;
+      allow update: if signedIn() && request.auth.uid == uid && request.resource.data.get('wallet', 0) == resource.data.get('wallet', 0);
+      allow delete: if signedIn() && request.auth.uid == uid; // needed by "Delete account"
+      match /favorites/{id} { allow read, write: if signedIn() && request.auth.uid == uid; }
+      match /notifications/{id} { allow read, update: if signedIn() && request.auth.uid == uid; }
+      match /transactions/{id} { allow read: if signedIn() && request.auth.uid == uid; }
+    }
+
+    // Orders are created by Cloud Functions. Customers read their own; admins read and update all.
+    match /orders/{id} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+
+    match /walletRequests/{id} {
+      allow create: if signedIn() && request.auth.uid == request.resource.data.userId && request.resource.data.status == 'pending';
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+    match /paymentClaims/{id} {
+      allow create: if signedIn() && request.auth.uid == request.resource.data.userId
+        && request.resource.data.status == 'pending' && request.resource.data.orderId == id
+        && get(/databases/$(db)/documents/orders/$(id)).data.userId == request.auth.uid
+        && get(/databases/$(db)/documents/orders/$(id)).data.total == request.resource.data.amount;
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+
+    // Settings: the welcome page is public (shown before login); the rest need a login. Only admins can change them.
+    match /config/welcome { allow read: if true; }
+    match /config/{doc} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Menu content: everyone signed in can read, only admins can change.
+    match /{coll}/{doc} {
+      allow read: if signedIn() && coll in ['menu', 'categories', 'banners', 'extras'];
+      allow write: if isAdmin() && coll in ['menu', 'categories', 'banners', 'extras'];
+    }
+  }
+}
